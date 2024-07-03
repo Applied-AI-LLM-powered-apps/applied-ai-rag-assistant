@@ -17,11 +17,13 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langsmith import traceable
 
+
 from shared.llm_facade import get_conversation_starters
 from utils.auth import check_password
-from utils.constants import Metadata
+from utils.constants import Metadata, CollectionType
 from utils.utilsdoc import get_store, extract_unique_name
 from utils.config_loader import load_config
+from utils.utilsfile import get_file
 from streamlit_feedback import streamlit_feedback
 import logging
 
@@ -347,9 +349,10 @@ def handle_assistant_response(user_query):
                     #show_retrievals = st.checkbox("Show PDFs")
                     try:
                         with st.expander(f"Source: {filename}", expanded=True):
-                            pdf_viewer(f"{upload_directory}/{filename}",
-                                       height=400,
-                                       pages_to_render=pages)
+                          file_object = get_file(filename, CollectionType.DOCUMENTS.value)
+                          pdf_viewer(file_object,
+                                      height=400,
+                                      pages_to_render=pages)
                     except FileNotFoundError as fnfe:
                         full_path = fnfe.filename
                         filename = os.path.basename(full_path)

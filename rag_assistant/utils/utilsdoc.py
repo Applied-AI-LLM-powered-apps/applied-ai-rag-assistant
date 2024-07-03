@@ -1,29 +1,41 @@
-from langchain.indexes.vectorstore import VectorStoreIndexWrapper
-from typing import Union, Optional
-from langchain_community.vectorstores import FAISS
-from langchain_community.vectorstores import OpenSearchVectorSearch
+import io
+import os
+import re
+import shutil
+import uuid
 
-from langchain.text_splitter import TokenTextSplitter
+from pathlib import Path
+from typing import Union, Optional
+
+
+import boto3
+import chromadb
 
 from PyPDF2 import PdfReader
+
+from langchain.indexes.vectorstore import VectorStoreIndexWrapper
 from langchain.docstore.document import Document
+from langchain.text_splitter import TokenTextSplitter
 from langchain_core.embeddings import Embeddings
+from langchain_community.vectorstores import FAISS, Chroma, OpenSearchVectorSearch
+
 from langchain_core.vectorstores import VectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from streamlit.runtime.uploaded_file_manager import UploadedFile
+
 import re
 
 import chromadb
 from langchain_community.vectorstores import Chroma
 import uuid
 
+
+from .utilsllm import load_embeddings
+from .config_loader import load_config
 from .constants import Metadata, ChunkType
 from requests_aws4auth import AWS4Auth
 from botocore.session import Session
 from opensearchpy import RequestsHttpConnection, exceptions
-
-from .utilsllm import load_embeddings
-from .config_loader import load_config
 
 
 config = load_config()
@@ -479,3 +491,112 @@ def load_text(texts: Union[list[UploadedFile], None, UploadedFile], metadata: di
         return docs
     else:
         return None
+
+
+def persist_uploaded_documents(documents: list[UploadedFile]) -> None:
+    """Persist documents uploaded from Streamlit"""
+    for document in documents:
+        persist_file(document, document.name)
+
+
+def persist_images(images) -> None:
+    """Persist images from pypdf"""
+    for image in images:
+        persist_file(image, image.name, 'image')
+
+
+def persist_chat(chat: str, chat_name: str) -> None:
+    """Persist chat history"""
+    raise NotImplementedError('Function not implemented yet.')
+
+
+def persist_file(file, filename:str, file_type: str = '') -> None:
+    """Persist file to selected storage interface"""
+    storage_interface = config.get('DOCUMENTS_STORAGE', 'INTERFACE')
+
+    if storage_interface == 'LOCAL':
+        persist_file_locally(file, filename=filename, file_type=file_type)
+    elif storage_interface == 'S3':
+        persist_file_to_s3(file, filename=filename, file_type=file_type)
+    elif storage_interface == 'NONE':
+        pass
+    else:
+        raise NotImplementedError(f"{storage_interface} not implemented yet for storage.")
+
+
+def persist_file_to_s3(file, filename: str, file_type: str) -> None:
+    """Persist file to S3 storage"""
+    s3_bucket = config.get('DOCUMENTS_STORAGE', 'S3_BUCKET_NAME')
+
+    folder_name = "images" if file_type == "image" else "docs"
+    file_key = f"{folder_name}/{filename}"
+
+    s3_client = boto3.client('s3')
+
+    if file_type == 'image':
+        file_object =  io.BytesIO(file.data)
+    else:
+        file_object = io.BytesIO(file.getvalue())
+
+    s3_client.upload_fileobj(file_object, s3_bucket, file_key)
+
+
+def persist_file_locally(file, filename:str, file_type: str) -> None:
+    """Persist file to local storage"""
+    documents_path = config.get('DOCUMENTS_STORAGE', 'DOCUMENTS_PATH')
+    folder_name = "images" if file_type == "image" else "docs"
+
+    file_path = os.path.join(documents_path, folder_name)
+
+    if not os.path.exists(file_path):
+        os.makedirs(file_path)
+
+    file_path = os.path.join(file_path, filename)
+
+    with open(file_path, 'wb') as f:
+        if file_type == 'image':
+            f.write(file.data)
+        else:
+            f.write(file.getvalue())
+
+
+def get_file(filename: str, file_type: str=''):
+    """Get file from selected storage interface"""
+    storage_interface = config.get('DOCUMENTS_STORAGE', 'INTERFACE')
+
+    if storage_interface == 'LOCAL':
+        return get_file_locally(filename=filename, file_type=file_type)
+
+    if storage_interface == 'S3':
+        return get_file_from_s3(filename=filename, file_type=file_type)
+
+    if storage_interface == 'NONE':
+        return None
+
+    raise NotImplementedError(f"{storage_interface} not implemented yet for storage.")
+
+
+def get_file_locally(filename: str, file_type: str):
+    """Get file from local storage"""
+    documents_path = config.get('DOCUMENTS_STORAGE', 'DOCUMENTS_PATH')
+    folder_name = "images" if file_type == "image" else "docs"
+
+    file_path = os.path.join(documents_path, folder_name, filename)
+
+    if os.path.exists(file_path):
+        return open(file_path, 'rb').read()
+
+    return None
+
+
+def get_file_from_s3(filename: str, file_type: str):
+    """Get file from S3 storage"""
+    s3_bucket = config.get('DOCUMENTS_STORAGE', 'S3_BUCKET_NAME')
+
+    folder_name = "images" if file_type == "image" else "docs"
+    file_key = f"{folder_name}/{filename}"
+
+    s3_client = boto3.client('s3')
+
+    response = s3_client.get_object(Bucket=s3_bucket, Key=file_key)
+    return response['Body'].read()

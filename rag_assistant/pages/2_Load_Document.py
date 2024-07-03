@@ -2,17 +2,19 @@ from typing import Optional
 
 import streamlit as st
 import os
+import io
 
 from llama_index.core import SimpleDirectoryReader
 from llama_index.core.schema import Document as LIDocument
 
 from utils.auth import check_password
-from utils.constants import DocumentType, SupportedFileType, Metadata
+from utils.constants import DocumentType, SupportedFileType, Metadata, CollectionType
 from utils.config_loader import load_config
 from utils.utilsdoc import load_doc, load_store
 from utils.utilsrag_li import build_summary_index
 
 from utils.utilsvision import load_image
+from utils.utilsfile import put_file
 
 config = load_config()
 
@@ -52,6 +54,7 @@ def main():
 
     if st.button("Transmettre", disabled=disabled):
 
+
         upload_files(analyse_images, file_type, generate_summary, image_only, pdfs, restart_image_analysis, topic_name, upload_only)
 
 
@@ -64,6 +67,7 @@ def upload_files(analyse_images, file_type, generate_summary, image_only, pdfs, 
         with open(file_path, 'wb') as f:
             f.write(pdf.read())
         file_paths.append(file_path)
+        put_file(io.BytesIO(pdf.getvalue()), pdf.name, CollectionType.DOCUMENTS.value)
     metadata = {Metadata.DOCUMENT_TYPE.value: file_type, Metadata.TOPIC.value: topic_name}
     docs = []
     if not image_only:

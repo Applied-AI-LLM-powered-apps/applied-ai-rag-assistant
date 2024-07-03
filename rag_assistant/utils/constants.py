@@ -24,3 +24,13 @@ class SupportedFileType(Enum):
     PDF = "pdf"
     MARKDOWN = "md"
     TEXT = "txt"
+
+class StorageType(Enum):
+    S3 = "S3"
+    LOCAL = "LOCAL"
+    NONE = "NONE"
+
+
+class CollectionType(Enum):
+    DOCUMENTS = "documents"
+    IMAGES = "images"
