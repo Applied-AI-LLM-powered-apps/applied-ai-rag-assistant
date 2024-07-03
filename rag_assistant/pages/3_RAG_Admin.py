@@ -5,8 +5,9 @@ import json
 from utils.auth import check_password
 from langchain_community.vectorstores import OpenSearchVectorSearch
 
-from utils.constants import DocumentType, ChunkType, Metadata
+from utils.constants import DocumentType, ChunkType, Metadata, CollectionType
 from utils.utilsdoc import get_store, empty_store, extract_unique_name, get_collection_count, get_metadatas, delete_documents_by_type_and_name
+from utils.utilsfile import list_files, delete_file
 from utils.config_loader import load_config
 
 
@@ -96,6 +97,7 @@ def main():
         file_name_to_delete = st.selectbox("Choisir un fichier", unique_filenames, index=None)
         if st.button("Supprimer les données du fichier"):
             delete_documents_by_type_and_name(collection_name=collection_name, type=Metadata.FILENAME.value, name=file_name_to_delete)
+            delete_file(file_name_to_delete, CollectionType.DOCUMENTS.value)
 
         chunk_type_to_delete = st.selectbox("Choisir un type de morceau (chunk)", [e.value for e in ChunkType], index=None)
         if st.button("Supprimer les données de ce type"):

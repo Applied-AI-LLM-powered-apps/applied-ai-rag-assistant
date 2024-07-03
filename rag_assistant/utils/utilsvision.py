@@ -3,6 +3,7 @@ import hashlib
 import imghdr
 import json
 import os
+import io
 import shutil
 from typing import Optional, Union
 
@@ -11,9 +12,10 @@ from langchain_core.documents import Document
 from pypdf import PdfReader
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
-from utils.constants import ChunkType, Metadata
+from utils.constants import ChunkType, Metadata, CollectionType
 from utils.config_loader import load_config
 from utils.utilsdoc import clean_text
+from utils.utilsfile import put_file
 
 config = load_config()
 
@@ -139,6 +141,8 @@ def load_image(pdfs: Union[list[UploadedFile], None, UploadedFile], metadata = N
 
                         else:
                             print(f"Failed to extract text from image {image.name}.")
+
+                        put_file(io.BytesIO(image.data), image.name, CollectionType.IMAGES.value)
         return docs
     else:
         return None
