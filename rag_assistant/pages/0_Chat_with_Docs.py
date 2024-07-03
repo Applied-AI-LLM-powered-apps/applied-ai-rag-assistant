@@ -36,13 +36,19 @@ log_dir = "logs"
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
+# handler = logging.FileHandler(os.path.join(log_dir, 'feedback.log'))
+# handler.setLevel(logging.INFO)
+
+# formatter = logging.Formatter('%(asctime)s - %(message)s')
+# handler.setFormatter(formatter)
+
+logger.handlers.clear()
 handler = logging.FileHandler(os.path.join(log_dir, 'feedback.log'))
 handler.setLevel(logging.INFO)
-
 formatter = logging.Formatter('%(asctime)s - %(message)s')
 handler.setFormatter(formatter)
-
 logger.addHandler(handler)
+
 
 config = load_config()
 collection_name = config['VECTORDB']['collection_name']
@@ -462,5 +468,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
