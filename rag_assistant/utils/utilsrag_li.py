@@ -4,21 +4,25 @@ from typing import Sequence, Optional
 import chromadb
 from langchain_core.documents import Document
 # from langchain_core.language_models import LLM
-from llama_index.core import Settings, VectorStoreIndex, load_index_from_storage, StorageContext
+from llama_index.core import Settings, VectorStoreIndex, load_index_from_storage, StorageContext, \
+    Document as LIDocument, get_response_synthesizer, DocumentSummaryIndex
 from llama_index.core.agent import FunctionCallingAgentWorker, AgentRunner
 from llama_index.core.agent.function_calling.base import FunctionCallingAgent
 from llama_index.core.base.base_query_engine import BaseQueryEngine
+from llama_index.core.indices.base import BaseIndex
 from llama_index.core.llms import LLM
 from llama_index.core.llms.function_calling import FunctionCallingLLM
 from llama_index.core.node_parser import SentenceWindowNodeParser, SentenceSplitter, HierarchicalNodeParser, \
     get_leaf_nodes
 from llama_index.core.postprocessor import MetadataReplacementPostProcessor, SentenceTransformerRerank
 from llama_index.core.query_engine import RetrieverQueryEngine, SubQuestionQueryEngine
+from llama_index.core.response_synthesizers import ResponseMode
 from llama_index.core.retrievers import AutoMergingRetriever
 from llama_index.core.tools import QueryEngineTool, ToolMetadata
-from llama_index.vector_stores.chroma import ChromaVectorStore
 
 from .config_loader import load_config
+from .utilsdoc import get_child_chunk_size, get_child_chunk_overlap
+from .utilsllm import load_llamaindex_model
 
 config = load_config()
 
@@ -26,7 +30,8 @@ llama_index_root_dir = config['LLAMA_INDEX']['LLAMA_INDEX_ROOT_DIR']
 sentence_index_dir = config['LLAMA_INDEX']['SENTENCE_INDEX_DIR']
 merging_index_dir = config['LLAMA_INDEX']['MERGING_INDEX_DIR']
 subquery_index_dir = config['LLAMA_INDEX']['SUBQUERY_INDEX_DIR']
-
+summary_index_dir = config["LLAMA_INDEX"]["SUMMARY_INDEX_DIR"]
+summary_index_folder = f"{llama_index_root_dir}/{summary_index_dir}"
 
 def build_sentence_window_index(
     documents,
@@ -209,8 +214,8 @@ def create_subquery_engine(
         doc_set[topic].append(doc)
         all_docs.append(doc)
 
-    Settings.chunk_size = 512
-    Settings.chunk_overlap = 64
+    Settings.chunk_size = get_child_chunk_size()
+    Settings.chunk_overlap = get_child_chunk_overlap()
     index_set = {}
     for topic in topics:
         # chroma_collection = db.get_or_create_collection(f"RAG_{topic}")
@@ -360,3 +365,97 @@ def create_li_agent(name: str, description: str, query_engine: BaseQueryEngine, 
     ## NEW GENERIC VERSION TO CALL TOOL WITH LLAMAINDEX
     #agent_li = FunctionCallingAgent.from_llm(tools=[query_engine_tool], llm=llm, verbose=True)
     return agent_li
+
+
+LLAMA_INDEX_ROOT_DIR = config["LLAMA_INDEX"]["LLAMA_INDEX_ROOT_DIR"]
+SUMMARY_INDEX_DIR = config["LLAMA_INDEX"]["SUMMARY_INDEX_DIR"]
+summary_index_folder = f"{LLAMA_INDEX_ROOT_DIR}/{SUMMARY_INDEX_DIR}"
+
+
+def build_summary_index(docs: list[LIDocument]) -> BaseIndex:
+    llm = load_llamaindex_model()
+    # embeddings = load_llamaindex_embeddings()
+    # splitter = SentenceSplitter(chunk_size=1024)
+    # nodes = splitter.get_nodes_from_documents(docs_prepare)
+    # summary_index = SummaryIndex(nodes)
+    #
+    #
+    # summary_query_engine = summary_index.as_query_engine(
+    #     response_mode="tree_summarize",
+    #     use_async=True,
+    #     llm=llm_prepare
+    # )
+
+    splitter = SentenceSplitter(chunk_size=get_child_chunk_size())
+    response_synthesizer = get_response_synthesizer(
+        response_mode=ResponseMode.TREE_SUMMARIZE, use_async=True
+    )
+    doc_summary_index = DocumentSummaryIndex.from_documents(
+        docs,
+        llm=llm,
+        transformations=[splitter],
+        response_synthesizer=response_synthesizer,
+        show_progress=True,
+    )
+    doc_summary_index.storage_context.persist(summary_index_folder)
+    #storage_context = StorageContext.from_defaults(persist_dir=summary_index_folder)
+    #doc_summary_index = load_index_from_storage(storage_context)
+    return doc_summary_index
+    # summary_tool = QueryEngineTool.from_defaults(
+    #     query_engine=summary_query_engine,
+    #     description=(
+    #         f"Use ONLY IF you want to get a holistic summary of {topic}."
+    #         f"Do NOT use if you have specific questions on {topic}."
+    #     ),
+    # )
+
+    # vector_index = VectorStoreIndex(nodes, embed_model=embeddings_prepare)
+    # vector_query_engine = vector_index.as_query_engine(llm=llm_prepare)
+    #
+    # vector_tool = QueryEngineTool.from_defaults(
+    #     query_engine=vector_query_engine,
+    #     description=(
+    #         f"Useful for retrieving specific questions over {topic}."
+    #     ),
+    # )
+
+    # query_engine = RouterQueryEngine(
+    #     selector=LLMSingleSelector.from_defaults(),
+    #     query_engine_tools=[
+    #         summary_tool,
+    #         vector_tool,
+    #     ],
+    #     verbose=True
+    # )
+    # query_engine = create_sentence_window_engine(
+    #     docs_prepare,
+    # )
+
+
+def get_summary_index_engine():
+    if os.path.exists(f"{summary_index_folder}/docstore.json"):
+        storage_context = StorageContext.from_defaults(persist_dir=summary_index_folder)
+        doc_summary_index = load_index_from_storage(storage_context)
+    else:
+        if not os.path.exists(summary_index_folder):
+            os.makedirs(summary_index_folder)
+        #storage_context = StorageContext.from_defaults()
+
+        llm = load_llamaindex_model()
+        splitter = SentenceSplitter(chunk_size=get_child_chunk_size())
+        response_synthesizer = get_response_synthesizer(
+            response_mode=ResponseMode.TREE_SUMMARIZE, use_async=True
+        )
+        doc_summary_index = DocumentSummaryIndex.from_documents(
+            [],
+            llm=llm,
+            transformations=[splitter],
+            response_synthesizer=response_synthesizer,
+            show_progress=True,
+        )
+        doc_summary_index.storage_context.persist(summary_index_folder)
+
+    summary_query_engine = doc_summary_index.as_query_engine(
+        response_mode=ResponseMode.TREE_SUMMARIZE, use_async=True
+    )
+    return summary_query_engine

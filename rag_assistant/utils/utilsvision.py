@@ -36,6 +36,7 @@ def image_to_text(encoded_image, media_type) -> Optional[str]:
     system_prompt = """Describe every detail you can about this image,
         be extremely thorough and detail even the most minute aspects of the image.
         Start your description by providing an image title followed by a short overall summary.
+        If the image is a table, output the content of the table in a structured format.
         """
 
     prompt = {
@@ -76,7 +77,6 @@ def image_to_text(encoded_image, media_type) -> Optional[str]:
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         return None
-
 
 
 def generate_unique_id(fname):

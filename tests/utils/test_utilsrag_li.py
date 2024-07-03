@@ -83,6 +83,7 @@ def get_prebuilt_trulens_recorder(query_engine, app_id, feedbacks):
 
 @pytest.fixture(scope="module")
 def temp_dir(request):
+    # TODO define a test specific dir...
     # Setup: Create a temporary directory for the test module
     dir_name = rag_assistant.utils.utilsrag_li.llama_index_root_dir
     os.makedirs(dir_name, exist_ok=True)
@@ -91,7 +92,9 @@ def temp_dir(request):
     yield dir_name
 
     # Teardown: Remove the temporary directory after tests are done
-    shutil.rmtree(dir_name)
+    if os.path.isdir(dir_name):  # Check if the directory exists before removing it
+        #shutil.rmtree(dir_name) # TODO commenting this while fix above is not done
+        pass
 
 
 def llm_prepare():

@@ -57,3 +57,4 @@ default.sqlite
 /logs
 *.log
 /tests/rechdocia
+/data/llama_index/

@@ -1,19 +1,13 @@
 import os
-import random
 import threading
 from json import JSONDecodeError
 
 import streamlit as st
-from langchain.agents import create_react_agent, AgentExecutor, create_structured_chat_agent
-from langchain.chains.query_constructor.base import get_query_constructor_prompt, StructuredQueryOutputParser
+from langchain.agents import AgentExecutor, create_structured_chat_agent
 from langchain.chains.query_constructor.schema import AttributeInfo
 from langchain.retrievers import SelfQueryRetriever
-from langchain_community.query_constructors.chroma import ChromaTranslator
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.tools import ToolException, Tool, tool
-from llama_index.core import StorageContext, load_index_from_storage
-from llama_index.core.response_synthesizers import ResponseMode
-from llama_index.core.tools import QueryEngineTool
+from langchain_core.tools import ToolException, tool
+from opensearchpy import NotFoundError
 from streamlit_pdf_viewer import pdf_viewer
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains.history_aware_retriever import create_history_aware_retriever
@@ -28,6 +22,9 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langsmith import traceable
 
 import utils.constants
+from shared.llm_facade import get_conversation_starters
+from utils.utilsrag_li import get_summary_index_engine
+from utils.auth import check_password
 from utils.constants import Metadata
 from utils.utilsdoc import get_store, extract_unique_name
 from utils.config_loader import load_config
@@ -45,8 +42,8 @@ load_dotenv(find_dotenv())
 openai_api_key = os.getenv('OPENAI_API_KEY')
 
 # set logging
-logger = logging.getLogger('AI_assistant_feedback')
-logger.setLevel(logging.INFO)
+feedback_logger = logging.getLogger('AI_assistant_feedback')
+feedback_logger.setLevel(logging.INFO)
 
 # Check if the directory exists, if not create it
 log_dir = "logs"
@@ -54,63 +51,25 @@ if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
 # Create a file handler for the logger
-handler = logging.FileHandler(os.path.join(log_dir, 'feedback.log'))
-handler.setLevel(logging.INFO)
+feedback_handler = logging.FileHandler(os.path.join(log_dir, 'feedback.log'))
+feedback_handler.setLevel(logging.INFO)
 
 # Create a logging format
 formatter = logging.Formatter('%(asctime)s -  %(message)s')
-handler.setFormatter(formatter)  # Add the formatter to the handler
+feedback_handler.setFormatter(formatter)  # Add the formatter to the handler
 
 # Add the handler to the logger
-logger.addHandler(handler)
+feedback_logger.addHandler(feedback_handler)
 
 config = load_config()
 collection_name = config['VECTORDB']['collection_name']
 upload_directory = config['FILE_MANAGEMENT']['UPLOAD_DIRECTORY']
+top_k = int(config['LANGCHAIN']['SEARCH_TOP_K'])
+search_type = config['LANGCHAIN']['SEARCH_TYPE']
 
-LLAMA_INDEX_ROOT_DIR = config["LLAMA_INDEX"]["LLAMA_INDEX_ROOT_DIR"]
-SUMMARY_INDEX_DIR = config["LLAMA_INDEX"]["SUMMARY_INDEX_DIR"]
-summary_index_folder = f"{LLAMA_INDEX_ROOT_DIR}/{SUMMARY_INDEX_DIR}"
+
 
 sessionid = "abc123"
-
-__template2__ = """You are an assistant designed to guide software application architect and tech lead to go through a risk assessment questionnaire for application cloud deployment. 
-    The questionnaire is designed to cover various pillars essential for cloud architecture,
-     including security, compliance, availability, access methods, data storage, processing, performance efficiency,
-      cost optimization, and operational excellence.
-      
-    You will assist user to answer to the questionnaire solely based on the information that will be provided to you.
-
-    For each question, you are to follow the "Chain of Thought" process. This means that for each user's response, you will:
-
-    - Acknowledge the response,
-    - Reflect on the implications of the choice,
-    - Identify any risks associated with the selected option,
-    - Suggest best practices and architecture patterns that align with the user’s selection,
-    - Guide them to the next relevant question based on their previous answers.
-
-    Your objective is to ensure that by the end of the questionnaire, the user has a clear understanding of the appropriate architecture and services needed for a secure, efficient, and compliant cloud deployment. Remember to provide answers in a simple, interactive, and concise manner.
-
-    Process:
-
-    1. Begin by introducing the purpose of the assessment and ask the first question regarding data security and compliance.
-    2. Based on the response, discuss the chosen level of data security, note any specific risks or requirements, and recommend corresponding cloud services or architectural patterns.
-    3. Proceed to the next question on application availability. Once the user responds, reflect on the suitability of their choice for their application's criticality and suggest availability configurations.
-    4. For questions on access methods and data storage, provide insights on securing application access points or optimizing data storage solutions.
-    5. When discussing performance efficiency, highlight the trade-offs between performance and cost, and advise on scaling strategies.
-    6. In the cost optimization section, engage in a brief discussion on budgetary constraints and recommend cost-effective cloud resource management.
-    7. Conclude with operational excellence, focusing on automation and monitoring, and propose solutions for continuous integration and deployment.
-    8. After the final question, summarize the user's choices and their implications for cloud architecture.
-    9. Offer a brief closing statement that reassures the user of the assistance provided and the readiness of their cloud deployment strategy.
-
-    Keep the interactions focused on architectural decisions without diverting to other unrelated topics.
-    Be concise in your answer with a professional tone. 
-    You are not to perform tasks outside the scope of the questionnaire, 
-    such as executing code or accessing external databases. 
-    Your guidance should be solely based on the information provided by the user in the context of the questionnaire.
-    
-    To start the conversation, introduce yourself and give 3 domains in which you can assist user."""
-
 
 class StreamHandler(BaseCallbackHandler):
     def __init__(self, container: st.delta_generator.DeltaGenerator, ctx, initial_text: str = ""):
@@ -138,7 +97,7 @@ class StreamHandler(BaseCallbackHandler):
 # Define the callback handler for printing retrieval information
 class PrintRetrievalHandler(BaseCallbackHandler):
     def __init__(self, container, ctx):
-        self.status = container.status("**Context Retrieval**")
+        self.status = container.status("**Récupération du Contexte**")
         self.ctx = ctx
 
     def on_retriever_start(self, serialized: dict, query: str, **kwargs):
@@ -146,14 +105,14 @@ class PrintRetrievalHandler(BaseCallbackHandler):
         add_script_run_ctx(threading.current_thread(), self.ctx)
         if 'retrievals' not in st.session_state:
             st.session_state['retrievals'] = []
-        self.status.write(f"**Question reformulée:** {query}")
+        self.status.write(f"**Question Reformulée:** {query}")
         # self.status.update(label=f"**Context Retrieval:** {query}")
 
     def on_retriever_end(self, documents, **kwargs):
         for idx, doc in enumerate(documents):
             source = doc.metadata[Metadata.FILENAME.value]
             page = doc.metadata[Metadata.PAGE.value]
-            self.status.write(f"**Chunk {idx} from {source} - page {page}**")
+            self.status.write(f"**Morceau {idx} de {source} - page {page}**")
             self.status.markdown(doc.page_content)
         st.session_state['retrievals'] = documents
         self.status.update(state="complete")
@@ -168,7 +127,8 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
 def configure_retriever():
     vectordb = get_store()
 
-    retriever = vectordb.as_retriever(search_type="similarity", search_kwargs={"k": 5})  # , "fetch_k": 4
+    retriever = vectordb.as_retriever(search_type=search_type,
+                                      search_kwargs={"k": top_k})
 
     return retriever
 
@@ -178,7 +138,7 @@ def _submit_feedback(user_response, emoji=None):
         feedback_score = '+1'
     else:
         feedback_score = '-1'
-    logger.info(f"Feedback_Score: {feedback_score}, Feedback_text: {user_response['text']}")
+    feedback_logger.info(f"Feedback_Score: {feedback_score}, Feedback_text: {user_response['text']}")
     return user_response
 
 
@@ -232,6 +192,7 @@ self_query_retriever = SelfQueryRetriever.from_llm(
     vectorstore,
     document_content_description,
     metadata_field_info,
+    search_kwargs={'k': top_k}
 )
 #
 # prompt = get_query_constructor_prompt(
@@ -256,12 +217,6 @@ st.session_state.store = {}
 # LLLL  LLLL  M   M   M
 #
 
-storage_context = StorageContext.from_defaults(persist_dir=summary_index_folder)
-doc_summary_index = load_index_from_storage(storage_context)
-summary_query_engine = doc_summary_index.as_query_engine(
-    response_mode=ResponseMode.TREE_SUMMARIZE, use_async=True
-)
-
 
 def _handle_error(error: ToolException) -> str:
     if error == JSONDecodeError:
@@ -275,7 +230,7 @@ def _handle_error(error: ToolException) -> str:
 
 
 # Setup LLM and QA chain
-llm_rag = load_model(temperature=0.1, streaming=False)
+llm_rag = load_model(temperature=0.1, streaming=True)
 llm = load_model(streaming=True)
 
 # llm.bind_tools(lc_tools)
@@ -284,23 +239,29 @@ msgs = get_session_history(sessionid)
 memory = ConversationBufferMemory(memory_key="chat_history", chat_memory=msgs, return_messages=True)
 
 ### Contextualize question ###
-contextualize_q_system_prompt = """Given a chat history and the latest user question \
-which might reference context in the chat history, formulate a standalone question \
-which can be understood without the chat history. \
-If the question has specific rules on the content of knowledge like \
-page number, file name or element type like Image, ensure to keep \
-all these informations on the reformulated question.
-Do NOT answer the question, just reformulate it if needed and otherwise return it as is.
-Maintain the same language as the user question.
-Do not explain your logic, just output the reformulated question.
-
-Reformulated Question:"""
+contextualize_q_system_prompt = """Your goal is to formulate a standalone question \
+that can be understood without conversation history.  \
+DO NOT answer the question.  \
+Given a chat history and the last user question \
+which might reference the chat history, reformulate the user question if needed, \
+otherwise return it as is. \
+If the question has specific directives on the content like \
+page number, file name or element type like Image, you MUST keep \
+all these directives in the reformulated question.
+Maintain the same language of the user question.
+DO NOT explain your logic, just output the standalone question.
+Check that your final answer is a new question that is related to user question.
+Check that the final answer has all the specific directives given in the last user question.
+"""
 
 contextualize_q_prompt = ChatPromptTemplate.from_messages(
     [
         ("system", contextualize_q_system_prompt),
         MessagesPlaceholder("chat_history"),
-        ("human", "{input}"),
+        ("human", "Reformulate the user question."
+                  "User Question '''{input}'''"
+                  ""
+                  "Reformulated question:"),
     ]
 )
 history_aware_retriever = create_history_aware_retriever(
@@ -315,7 +276,7 @@ qa_system_prompt = """You are an assistant for question-answering tasks on {topi
 Use the following pieces of retrieved context to answer the question. \
 If you don't know the answer, just say that you don't know. \
 If the question is not on {topics}, don't answer it. \
-Use three sentences maximum and keep the answer concise.\
+Keep the answer concise except if the user ask specifically for a detailed answer.\
 Maintain the same writing style as used in the context.\
 Keep the same language as the follow up question.
 
@@ -355,6 +316,7 @@ def knowledge_summary(question: str) -> str:
     """Useful IF you need to answer a general question or need to have a holistic summary on knowledge.
     DO NOT use if you have specific question.
     DO NOT USE MULTI-ARGUMENTS INPUT."""
+    summary_query_engine = get_summary_index_engine()
     return summary_query_engine.query(question)
 
 
@@ -420,96 +382,36 @@ conversational_rag_chain = RunnableWithMessageHistory(
 
 main_chain = conversational_rag_chain
 
-suggested_questions_examples = [
-    "Comment sécuriser les données sensibles ?",
-    "Quelles stratégies pour une haute disponibilité ?",
-    "Quels sont les mécanismes d'authentification API ?",
-    "Comment assurez l'efficacité des performances ?",
-    "Quelles informations doivent être fournies lors du lancement de l'IHM?",
-    "Quel est le rôle de la fonction d'acheminement pour acheminer l'appel de service?",
-    'Quelles sont les principales fonctionnalités du portail fournisseur dans la gestion des API?',
-    "Que comprend la fonction d'exposition dans la gestion des API?"
-]
-
-
-def conversation_starters():
-    llm = load_model(streaming=True)
-
-    context = summary_query_engine.query("Make a complete summary of knowledge available"
-                                         " on following topics {topics}.")
-
-    ### Answer question ###
-    cs_system_prompt = """You are a helpful solution architect and software engineer assistant.
-        Your users are asking questions on specific topics.\
-        Suggest exactly 6 questions related to the provided context to help them find the information they need. \
-        Suggest only short questions without compound sentences. \
-        Question must be self-explanatory and topic related.
-        Suggest a variety of questions that cover different aspects of the context. \
-        Use the summary of knowledge to generate the question on topics. \
-        Make sure they are complete questions, and that they are related to the topics.
-        Output one question per line. Do not number the questions. Do not group question by topics. 
-        DO NOT make a summary or an introduction of your result. Output ONLY the generated questions.
-        DO NOT output chapter per topic. Avoid blank line.
-        Avoid duplicate question. Generate question in French.
-        Questions: """
-
-    #         Examples:
-    #         What information needs to be provided during IHM launch?
-    #         How is the data transferred to the service call?
-    #         What functions are involved in API Management?
-    #         What does the Exposure function in API Management entail?
-
-    cs_prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", cs_system_prompt),
-            ("human", "{topics}"
-                      "{summary}"),
-        ]
-    )
-    output_parser = StrOutputParser()
-    model = load_model(streaming=False)
-
-    chain = cs_prompt | model | output_parser
-    response = chain.invoke({"topics": topics, "summary": context})
-    print(response)
-
-    response_list = [line for line in response.split("\n") if line.strip() != '']
-    if len(response_list) > 4:
-        response_list = random.sample(response_list, 4)
-    elif len(response_list) < 4:
-        diff = 4 - len(response_list)
-        additional_questions = random.sample(suggested_questions_examples, diff)
-        response_list.extend(additional_questions)
-
-    return response_list
-
-
 if 'conversation_starters' not in st.session_state:
-    st.session_state['conversation_starters'] = conversation_starters()
+    st.session_state['conversation_starters'] = get_conversation_starters(unique_topic_names)
 
-suggested_questions = st.session_state['conversation_starters']
 
 @traceable(run_type="chain", project_name="RAG Assistant", tags=["LangChain", "RAG", "Chat_with_Docs"])
 def handle_assistant_response(user_query):
-    st.chat_message("user").write(user_query)
-    with ((st.chat_message("assistant"))):
-        if 'retrievals' in st.session_state:
-            del st.session_state['retrievals']
-        response = main_chain.invoke(
-            input={"input": user_query, "topics": topics},
-            config={"configurable": {"session_id": sessionid}}
-        )
-        ai_response = response["output"]  # "answer"
-        # emptying container to remove initial question that is render by llm
-        # e.empty()
-        e = st.empty()
-        with e.container():
-            st.markdown(ai_response)
-            # context = response["context"]
+    try:
+        st.chat_message("user").write(user_query)
+        with ((st.chat_message("assistant"))):
             if 'retrievals' in st.session_state:
-                context = st.session_state['retrievals']
-                display_context_in_pdf_viewer(context)
-        logger.info(f"User Query: {user_query}, AI Response: {ai_response}")
+                del st.session_state['retrievals']
+            response = main_chain.invoke(
+                input={"input": user_query, "topics": topics},
+                config={"configurable": {"session_id": sessionid}}
+            )
+            ai_response = response["output"]  # "answer"
+            # emptying container to remove initial question that is render by llm
+            # e.empty()
+            e = st.empty()
+            with e.container():
+                st.markdown(ai_response)
+                # context = response["context"]
+                if 'retrievals' in st.session_state:
+                    context = st.session_state['retrievals']
+                    display_context_in_pdf_viewer(context)
+            feedback_logger.info(f"User Query: {user_query}, AI Response: {ai_response}")
+    except NotFoundError as e:
+        print(f"Erreur sur  opensearch: {e}")
+        st.error(f"La base de connaissance n'a pas été initialisée.\n\n"
+                 f"Source: {e}")
 
 
 def display_context_in_pdf_viewer(context):
@@ -530,22 +432,29 @@ def display_context_in_pdf_viewer(context):
         filename = first_metadata[0]
         pages = first_metadata[1]
         # show_retrievals = st.checkbox("Show PDFs")
-        with st.expander(f"Source: {filename}", expanded=True):
-            pdf_viewer(f"{upload_directory}/{filename}",
-                       height=400,
-                       pages_to_render=pages)
-
+        try:
+            with st.expander(f"Source: {filename}", expanded=True):
+                pdf_viewer(f"{upload_directory}/{filename}",
+                           height=400,
+                           pages_to_render=pages)
+        except FileNotFoundError as fnfe:
+            full_path = fnfe.filename
+            filename = os.path.basename(full_path)
+            print(f"Erreur sur l'affichage du PDF: {fnfe}")
+            st.error(f"Le fichier PDF '{filename}' est manquant.")
 
 def suggestion_clicked(question):
     st.session_state.user_suggested_question = question
 
 
 def main():
-    st.title("Chat with Documents")
+    st.title("Dialogue avec les Connaissances")
 
     msgs = get_session_history(sessionid)
 
-    if len(msgs.messages) == 0 or st.sidebar.button("Clear message history"):
+    suggested_questions = st.session_state['conversation_starters']
+
+    if len(msgs.messages) == 0 or st.sidebar.button("Effacer la conversation"):
         msgs.clear()
 
     # Display suggested questions in a 2x2 table
@@ -564,7 +473,7 @@ def main():
         st.chat_message(avatars[msg.type]).write(msg.content)
         if (msg.type == "ai") and (i > 0):
             streamlit_feedback(feedback_type="thumbs",
-                               optional_text_label="Cette réponse vous convient-elle?",
+                               optional_text_label="Cette réponse te convient?",
                                key=f"feedback_{i}",
                                on_submit=lambda x: _submit_feedback(x, emoji="👍"))
 
@@ -575,9 +484,12 @@ def main():
         handle_assistant_response(user_query)
 
     # Handle user queries
-    if user_query := st.chat_input(placeholder="Ask me anything!"):
+    if user_query := st.chat_input(placeholder="Pose-moi toutes tes questions!"):
         handle_assistant_response(user_query)
 
 
 if __name__ == "__main__":
+    if not check_password():
+        # Do not continue if check_password is not True.
+        st.stop()
     main()

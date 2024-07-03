@@ -7,8 +7,10 @@ import uuid
 from pathlib import Path
 from typing import Union, Optional
 
+
 import boto3
 import chromadb
+
 from PyPDF2 import PdfReader
 
 from langchain.indexes.vectorstore import VectorStoreIndexWrapper
@@ -21,15 +23,35 @@ from langchain_core.vectorstores import VectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
+import re
+
+import chromadb
+from langchain_community.vectorstores import Chroma
+import uuid
+
+
 from .utilsllm import load_embeddings
 from .config_loader import load_config
 from .constants import Metadata, ChunkType
 from requests_aws4auth import AWS4Auth
 from botocore.session import Session
-from opensearchpy import RequestsHttpConnection
+from opensearchpy import RequestsHttpConnection, exceptions
 
 
 config = load_config()
+child_chunk_size = int(config['KNOWLEDGE']['CHILD_CHUNK_SIZE'])
+child_chunk_overlap = int(config['KNOWLEDGE']['CHILD_CHUNK_OVERLAP'])
+
+parent_chunk_size = int(config['KNOWLEDGE']['PARENT_CHUNK_SIZE'])
+parent_chunk_overlap = int(config['KNOWLEDGE']['PARENT_CHUNK_OVERLAP'])
+
+
+def get_child_chunk_size() -> int:
+    return child_chunk_size
+
+
+def get_child_chunk_overlap() -> int:
+    return child_chunk_overlap
 
 
 def extract_unique_name(collection_name : str, key : str):
@@ -47,28 +69,51 @@ def get_metadatas(collection_name : str):
     if isinstance(store, OpenSearchVectorSearch):
         client = store.client
         index_name = collection_name.lower()
-        response = client.search(
-            index=index_name,
-            body={
-                "query": {
-                    "match_all": {}
-                },
-                "_source": {
-                    "includes": ["metadata"]
+        try:
+            response = client.search(
+                index=index_name,
+                scroll='2m',  # Keep the search context alive for 2 minutes
+                size=100,  # Adjust the size per page
+                body={
+                    "query": {
+                        "match_all": {}
+                    },
+                    "_source": {
+                        "includes": ["metadata"]
+                    }
                 }
-            }
-        )
-        documents = response['hits']['hits']
-        metadatas = [doc['_source']['metadata'] for doc in documents]
-    else:
+            )
+
+            # List to hold all results
+            all_results = response['hits']['hits']
+
+            # Use the scroll API to fetch all results
+            while True:
+                scroll_id = response['_scroll_id']
+                response = client.scroll(
+                    scroll_id=scroll_id,
+                    scroll='2m'
+                )
+                
+                # Break the loop if no more results
+                if not response['hits']['hits']:
+                    break
+                
+                all_results.extend(response['hits']['hits'])
+            metadatas = [doc['_source']['metadata'] for doc in all_results]
+        except exceptions.NotFoundError:
+            metadatas = []
+    elif isinstance(store, Chroma):
         collection = store._collection
         metadatas = collection.get()['metadatas']
+    else:
+        return {}
 
     return metadatas
 
 
 def delete_documents_by_type_and_name(collection_name: str, type: str, name: str):
-    if type not in [Metadata.FILENAME.value, Metadata.TOPIC.value]:
+    if type not in [Metadata.FILENAME.value, Metadata.TOPIC.value, Metadata.CHUNK_TYPE.value]:
         raise ValueError(f"Type {type} not supported for deletion")
 
     store = get_store(collection_name=collection_name)
@@ -92,54 +137,76 @@ def delete_documents_by_type_and_name(collection_name: str, type: str, name: str
         collection = store._collection
         collection.delete(where={f"{type}": {"$eq": f"{name}"}})
 
-def split_documents(documents: list[Document]):
+
+def split_documents(documents: list[Document]) -> list[Document]:
     # Initialize text splitter
-    text_splitter = TokenTextSplitter(chunk_size=1024, chunk_overlap=24)
+    text_splitter = TokenTextSplitter(
+        chunk_size=parent_chunk_size,
+        chunk_overlap=parent_chunk_overlap)
     chunks = text_splitter.split_documents(documents)
 
     return chunks
 
 
-def process_txt_folder(txt_input_folder_name, txt_folder_name):
-    # Initialize tokenizer
-    # tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+def _chunk_texts(texts: str) -> list[str]:
+    character_splitter = RecursiveCharacterTextSplitter(
+        separators=["\n\n", "\n", ". ", " ", ""],
+        chunk_size=child_chunk_size,
+        chunk_overlap=child_chunk_overlap
+    )
+    character_split_texts = character_splitter.split_text(texts)
 
-    data = []
-    sources = []
+    # token_splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=0, tokens_per_chunk=256)
 
-    text_splitter = TokenTextSplitter(chunk_size=512, chunk_overlap=24)
+    # token_split_texts = []
+    # for text in character_split_texts:
+    #     token_split_texts += token_splitter.split_text(text)
 
-    # Iterate over all files in the folder
-    for filename in os.listdir(txt_input_folder_name):
-        # Only process PDF files
-        if filename.endswith(".txt"):
-            # Full path to the file
-            filepath = os.path.join(txt_input_folder_name, filename)
+    return character_split_texts
 
-            # Write the extracted text to a .txt file
-            txt_filename = filename
-            txt_filepath = os.path.join(txt_folder_name, txt_filename)
-            path = Path(txt_filepath)
-            if not path.is_file():
-                print("Storing text:", txt_filename)
-                shutil.copy(filepath, txt_filepath)
 
-            # Read the .txt file
-            with open(txt_filepath, 'r') as f:
-                data.append(f.read())
-            sources.append(filename)
-
-        # Here we split the documents, as needed, into smaller chunks.
-        # We do this due to the context limits of the LLMs.
-        docs = []
-        metadatas = []
-        for i, d in enumerate(data):
-            splits = text_splitter.create_documents(d)
-            docs.extend(splits)
-            metadatas.extend([{"source": sources[i]}] * len(splits))
-
-    # Return the array of chunks
-    return docs, metadatas
+# def process_txt_folder(txt_input_folder_name, txt_folder_name):
+#     # Initialize tokenizer
+#     # tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+#
+#     data = []
+#     sources = []
+#
+#     text_splitter = TokenTextSplitter(
+#         chunk_size=chunk_size,
+#         chunk_overlap=chunk_overlap)
+#
+#     # Iterate over all files in the folder
+#     for filename in os.listdir(txt_input_folder_name):
+#         # Only process PDF files
+#         if filename.endswith(".txt"):
+#             # Full path to the file
+#             filepath = os.path.join(txt_input_folder_name, filename)
+#
+#             # Write the extracted text to a .txt file
+#             txt_filename = filename
+#             txt_filepath = os.path.join(txt_folder_name, txt_filename)
+#             path = Path(txt_filepath)
+#             if not path.is_file():
+#                 print("Storing text:", txt_filename)
+#                 shutil.copy(filepath, txt_filepath)
+#
+#             # Read the .txt file
+#             with open(txt_filepath, 'r') as f:
+#                 data.append(f.read())
+#             sources.append(filename)
+#
+#         # Here we split the documents, as needed, into smaller chunks.
+#         # We do this due to the context limits of the LLMs.
+#         docs = []
+#         metadatas = []
+#         for i, d in enumerate(data):
+#             splits = text_splitter.create_documents(d)
+#             docs.extend(splits)
+#             metadatas.extend([{"source": sources[i]}] * len(splits))
+#
+#     # Return the array of chunks
+#     return docs, metadatas
 
 
 def empty_store(collection_name="Default") -> None:
@@ -154,6 +221,29 @@ def empty_store(collection_name="Default") -> None:
         persistent_client = chromadb.PersistentClient(path=persist_directory)
 
         persistent_client.delete_collection(name=collection_name)
+
+    elif vectordb == "opensearch":
+        credentials = Session().get_credentials()
+        aws_region = config.get('VECTORDB', 'opensearch_aws_region')
+
+        awsauth = AWS4Auth(region=aws_region, service='es',
+                    refreshable_credentials=credentials)
+
+        opensearch_url = config.get('VECTORDB', 'opensearch_url')
+        # Index name should be lowercase
+        index_name = collection_name.lower()
+
+        db = OpenSearchVectorSearch(
+            opensearch_url=opensearch_url,
+            embedding_function=load_embeddings(),
+            http_auth=awsauth,
+            timeout=300,
+            use_ssl=True,
+            verify_certs=True,
+            connection_class=RequestsHttpConnection,
+            index_name=index_name,
+        )
+        db.delete_index(index_name)
     else:
         raise NotImplementedError(f"{vectordb} empty_store not implemented yet")
 
@@ -241,8 +331,10 @@ def load_store(documents: list[Document], embeddings: Embeddings = None, collect
         # Index name should be lowercase
         index_name = config.get('VECTORDB', 'collection_name').lower()
 
+        bulk_size = config.getint('VECTORDB', 'opensearch_bulk_size', fallback=500)
+
         db = OpenSearchVectorSearch.from_documents(
-            documents,
+            documents[:bulk_size],
             embedding=embeddings,
             opensearch_url=opensearch_url,
             http_auth=awsauth,
@@ -251,7 +343,13 @@ def load_store(documents: list[Document], embeddings: Embeddings = None, collect
             verify_certs=True,
             connection_class=RequestsHttpConnection,
             index_name=index_name,
+            bulk_size=bulk_size
         )
+        remaining_documents = documents[bulk_size:]
+
+        while remaining_documents:
+            db.add_documents(remaining_documents[:bulk_size])
+            remaining_documents = remaining_documents[bulk_size:]
     else:
         raise NotImplementedError(f"{vectordb} load_store not implemented yet")
 
@@ -301,6 +399,8 @@ def get_store(embeddings: Embeddings = None, collection_name=None) -> VectorStor
         # Index name should be lowercase
         index_name = collection_name.lower()
 
+        bulk_size = config.getint('VECTORDB', 'opensearch_bulk_size', fallback=500)
+
         db = OpenSearchVectorSearch(
             opensearch_url=opensearch_url,
             embedding_function=embeddings,
@@ -310,24 +410,37 @@ def get_store(embeddings: Embeddings = None, collection_name=None) -> VectorStor
             verify_certs=True,
             connection_class=RequestsHttpConnection,
             index_name=index_name,
+            bulk_size=bulk_size
         )
     else:
         raise NotImplementedError(f"{vectordb} get_store not implemented yet")
 
     return db
 
-def get_collection_count() -> int:
+
+def get_collection_count(collection_name:str = None) -> int:
     """Get the number of documents in a collection (chroma, FAISS) or an index (opensearch)"""
-    store = get_store()
+    if collection_name is None:
+        collection_name = config.get('VECTORDB', 'collection_name')
+    store = get_store(collection_name)
     if isinstance(store, OpenSearchVectorSearch):
         client = store.client
-        collection_name = config.get('VECTORDB', 'collection_name')
         index_name = collection_name.lower()
-        count = client.count(index=index_name)['count']
-    else:
+        try:
+            count_response = client.count(index=index_name)
+        except exceptions.NotFoundError:
+            count_response = None
+        if count_response:
+            count = count_response['count']
+        else:
+            count = 0
+    elif isinstance(store, Chroma):
         collection = store._collection
         count = collection.count()
+    elif isinstance(store, FAISS):
+        count = 0
     return count
+
 
 def clean_text(s):
     regex_replacements = [
@@ -337,23 +450,6 @@ def clean_text(s):
     for regex, replacement in regex_replacements:
         s = regex.sub(replacement, s)
     return s
-
-
-def _chunk_texts(texts):
-    character_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-        separators=["\n\n", "\n", ". ", " ", ""],
-        chunk_size=256,
-        chunk_overlap=32
-    )
-    character_split_texts = character_splitter.split_text(texts)
-
-    # token_splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=0, tokens_per_chunk=256)
-
-    # token_split_texts = []
-    # for text in character_split_texts:
-    #     token_split_texts += token_splitter.split_text(text)
-
-    return character_split_texts
 
 
 def load_doc(pdfs: Union[list[UploadedFile], None, UploadedFile], metadata = None) -> Optional[list[Document]]:

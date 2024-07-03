@@ -1,7 +1,9 @@
 import os
 import threading
 
+import opensearchpy
 import streamlit as st
+from opensearchpy import NotFoundError
 from streamlit_pdf_viewer import pdf_viewer
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains.history_aware_retriever import create_history_aware_retriever
@@ -15,6 +17,9 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langsmith import traceable
 
+
+from shared.llm_facade import get_conversation_starters
+from utils.auth import check_password
 from utils.constants import Metadata, CollectionType
 from utils.utilsdoc import get_store, extract_unique_name
 from utils.config_loader import load_config
@@ -31,8 +36,8 @@ load_dotenv(find_dotenv())
 openai_api_key = os.getenv('OPENAI_API_KEY')
 
 # set logging
-logger = logging.getLogger('AI_assistant_feedback')
-logger.setLevel(logging.INFO)
+feedback_logger = logging.getLogger('AI_assistant_feedback')
+feedback_logger.setLevel(logging.INFO)
 
 # Check if the directory exists, if not create it
 log_dir = "logs"
@@ -40,20 +45,22 @@ if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
 # Create a file handler for the logger
-handler = logging.FileHandler(os.path.join(log_dir, 'feedback.log'))
-handler.setLevel(logging.INFO)
+feedback_handler = logging.FileHandler(os.path.join(log_dir, 'feedback.log'))
+feedback_handler.setLevel(logging.INFO)
 
 # Create a logging format
 formatter = logging.Formatter('%(asctime)s -  %(message)s')
-handler.setFormatter(formatter) # Add the formatter to the handler  
+feedback_handler.setFormatter(formatter) # Add the formatter to the handler
 
 # Add the handler to the logger
-logger.addHandler(handler)
+feedback_logger.addHandler(feedback_handler)
 
 
 config = load_config()
 collection_name = config['VECTORDB']['collection_name']
 upload_directory = config['FILE_MANAGEMENT']['UPLOAD_DIRECTORY']
+top_k = int(config['LANGCHAIN']['SEARCH_TOP_K'])
+search_type = config['LANGCHAIN']['SEARCH_TYPE']
 
 sessionid = "abc123"
 
@@ -121,20 +128,20 @@ class StreamHandler(BaseCallbackHandler):
 # Define the callback handler for printing retrieval information
 class PrintRetrievalHandler(BaseCallbackHandler):
     def __init__(self, container, ctx):
-        self.status = container.status("**Context Retrieval**")
+        self.status = container.status("**Récupération du Contexte**")
         self.ctx = ctx
 
     def on_retriever_start(self, serialized: dict, query: str, **kwargs):
         # adding current thread to streamlit context to be able to display streaming
         add_script_run_ctx(threading.current_thread(), self.ctx)
-        self.status.write(f"**Question:** {query}")
-        self.status.update(label=f"**Context Retrieval:** {query}")
+        self.status.write(f"**Question Reformulée:** {query}")
+        # self.status.update(label=f"**Context Retrieval:** {query}")
 
     def on_retriever_end(self, documents, **kwargs):
         for idx, doc in enumerate(documents):
             source = doc.metadata[Metadata.FILENAME.value]
             page = doc.metadata[Metadata.PAGE.value]
-            self.status.write(f"**Chunk {idx} from {source} - page {page}**")
+            self.status.write(f"**Morceau {idx} de {source} - page {page}**")
             self.status.markdown(doc.page_content)
         self.status.update(state="complete")
 
@@ -148,7 +155,8 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
 def configure_retriever():
     vectordb = get_store()
 
-    retriever = vectordb.as_retriever(search_type="similarity", search_kwargs={"k": 5}) # , "fetch_k": 4
+    retriever = vectordb.as_retriever(search_type=search_type,
+                                      search_kwargs={"k": top_k})
 
     return retriever
 
@@ -158,7 +166,7 @@ def _submit_feedback(user_response, emoji=None):
         feedback_score = '+1'
     else:
         feedback_score = '-1'
-    logger.info(f"Feedback_Score: {feedback_score}, Feedback_text: {user_response['text']}")
+    feedback_logger.info(f"Feedback_Score: {feedback_score}, Feedback_text: {user_response['text']}")
     return user_response
 
 
@@ -196,7 +204,7 @@ contextualize_q_system_prompt = """Given a chat history and the latest user ques
 which might reference context in the chat history, formulate a standalone question \
 which can be understood without the chat history. Do NOT answer the question, \
 just reformulate it if needed and otherwise return it as is.
-User question should be on {topic}.
+User question should be on {topics}.
 Do not explain your logic, just output the reformulated question.
 
 Reformulated Question:"""
@@ -271,85 +279,91 @@ conversational_rag_chain = RunnableWithMessageHistory(
 #     combine_docs_chain_kwargs={'prompt': qa_prompt}
 # )
 
-suggested_questions = [
-    "Comment sécuriser les données sensibles ?",
-    "Quelles stratégies pour une haute disponibilité ?",
-    "Quels sont les mécanismes d'authentification API ?",
-    "Comment assurez l'efficacité des performances ?",
-]
+
+if 'conversation_starters' not in st.session_state:
+    st.session_state['conversation_starters'] = get_conversation_starters(unique_topic_names)
 
 
 @traceable(run_type="chain", project_name="RAG Assistant", tags=["LangChain", "RAG", "Chat_with_Docs"])
 def handle_assistant_response(user_query):
-    st.chat_message("user").write(user_query)
-    with ((st.chat_message("assistant"))):
-        # Retrieving the streamlit context to bind it to call back
-        # in order to write in another threadcontext
-        ctx = get_script_run_ctx()
-        retrieval_handler = PrintRetrievalHandler(st.container(), ctx)
-        # RETRIEVE THE CONTAINER TO CLEAR IT LATER to not show question twice
-        e = st.empty()
-        stream_handler = StreamHandler(e, ctx)
-        # CODE WORKING BUT ALL LC API
-        # THE CODE BELOW IS WORKING WITH RETRIEVER PRINT AND STREAMING
-        # BUT ADDING A SYSTEM PROMPT SEEMS VERY TRICKY
-        # OK SYSTEM PROMPT ADDED ABOVE ON QA_CHAIN WITH combine_docs_chain_kwargs
-        # ai_response = qa_chain.invoke({"question": user_query},
-        #                               {"configurable": {"session_id": sessionid},
-        #                                   "callbacks": [
-        #                                   retrieval_handler,
-        #                                   stream_handler
-        #                                 ]
-        #                               },
-        # )["answer"]
-        # END CODE WORKING WITH ALL LC API
+    try:
+        st.chat_message("user").write(user_query)
+        with ((st.chat_message("assistant"))):
+            # Retrieving the streamlit context to bind it to call back
+            # in order to write in another threadcontext
+            ctx = get_script_run_ctx()
+            retrieval_handler = PrintRetrievalHandler(st.container(), ctx)
+            # RETRIEVE THE CONTAINER TO CLEAR IT LATER to not show question twice
+            e = st.empty()
+            stream_handler = StreamHandler(e, ctx)
+            # CODE WORKING BUT ALL LC API
+            # THE CODE BELOW IS WORKING WITH RETRIEVER PRINT AND STREAMING
+            # BUT ADDING A SYSTEM PROMPT SEEMS VERY TRICKY
+            # OK SYSTEM PROMPT ADDED ABOVE ON QA_CHAIN WITH combine_docs_chain_kwargs
+            # ai_response = qa_chain.invoke({"question": user_query},
+            #                               {"configurable": {"session_id": sessionid},
+            #                                   "callbacks": [
+            #                                   retrieval_handler,
+            #                                   stream_handler
+            #                                 ]
+            #                               },
+            # )["answer"]
+            # END CODE WORKING WITH ALL LC API
 
-        # NEW API OF LANGCHAIN
-        # PROMPT NEED TO BE CHANGED
-        response = conversational_rag_chain.invoke(
-            input={"input": user_query, "topics": topics},
-            config={
-                "configurable": {"session_id": sessionid},
-                "callbacks": [
-                    retrieval_handler,
-                    stream_handler
-                ]
-            },
-        )
+            # NEW API OF LANGCHAIN
+            # PROMPT NEED TO BE CHANGED
+            response = conversational_rag_chain.invoke(
+                input={"input": user_query, "topics": topics},
+                config={
+                    "configurable": {"session_id": sessionid},
+                    "callbacks": [
+                        retrieval_handler,
+                        stream_handler
+                    ]
+                },
+            )
+            ai_response = response["answer"]
+            # emptying container to remove initial question that is render by llm
+            e.empty()
+            with e.container():
+                st.markdown(ai_response)
+                context = response["context"]
+                metadata = [(doc.metadata['filename'], doc.metadata['page']) for doc in context]
+                metadata_dict = {}
+                for filename, page in metadata:
+                    if filename not in metadata_dict:
+                        metadata_dict[filename] = []  # Initialize a new list for new filename
+                    metadata_dict[filename].append(page)
 
+                # Create a new sorted list
+                sorted_metadata = sorted(metadata_dict.items(), key=lambda x: len(x[1]), reverse=True)
 
-        ai_response = response["answer"]
-        # emptying container to remove initial question that is render by llm
-        e.empty()
-        with e.container():
-            st.markdown(ai_response)
-            context = response["context"]
-            metadata = [(doc.metadata['filename'], doc.metadata['page']) for doc in context]
-            metadata_dict = {}
-            for filename, page in metadata:
-                if filename not in metadata_dict:
-                    metadata_dict[filename] = []  # Initialize a new list for new filename
-                metadata_dict[filename].append(page)
+                # Format the sorted list
+                formatted_metadata = []
+                for item in sorted_metadata:
+                    formatted_metadata.append([item[0], item[1]])
+                if formatted_metadata:  # check if list is empty
+                    first_metadata = formatted_metadata[0]
+                    filename = first_metadata[0]
+                    pages = first_metadata[1]
+                    #show_retrievals = st.checkbox("Show PDFs")
+                    try:
+                        with st.expander(f"Source: {filename}", expanded=True):
+                          file_object = get_file(filename, CollectionType.DOCUMENTS.value)
+                          pdf_viewer(file_object,
+                                      height=400,
+                                      pages_to_render=pages)
+                    except FileNotFoundError as fnfe:
+                        full_path = fnfe.filename
+                        filename = os.path.basename(full_path)
+                        print(f"Erreur sur l'affichage du PDF: {fnfe}")
+                        st.error(f"Le fichier PDF '{filename}' est manquant.")
 
-            # Create a new sorted list
-            sorted_metadata = sorted(metadata_dict.items(), key=lambda x: len(x[1]), reverse=True)
-
-            # Format the sorted list
-            formatted_metadata = []
-            for item in sorted_metadata:
-                formatted_metadata.append([item[0], item[1]])
-            if formatted_metadata:  # check if list is empty
-                first_metadata = formatted_metadata[0]
-                filename = first_metadata[0]
-                pages = first_metadata[1]
-                #show_retrievals = st.checkbox("Show PDFs")
-                with st.expander(f"Source: {filename}", expanded=True):
-                    file_object = get_file(filename, CollectionType.DOCUMENTS.value)
-                    pdf_viewer(file_object,
-                                height=400,
-                                pages_to_render=pages)
-        logger.info(f"User Query: {user_query}, AI Response: {ai_response}")
-
+            feedback_logger.info(f"User Query: {user_query}, AI Response: {ai_response}")
+    except NotFoundError as e:
+        print(f"Erreur sur  opensearch: {e}")
+        st.error(f"La base de connaissance n'a pas été initialisée.\n\n"
+                 f"Source: {e}")
 
 
 def suggestion_clicked(question):
@@ -357,21 +371,25 @@ def suggestion_clicked(question):
 
 
 def main():
-    st.title("Chat with Documents")
+    st.title("Dialogue avec les Connaissances")
 
     msgs = get_session_history(sessionid)
 
-    if len(msgs.messages) == 0 or st.sidebar.button("Clear message history"):
+    suggested_questions = st.session_state['conversation_starters']
+
+    if len(msgs.messages) == 0 or st.sidebar.button("Effacer la conversation"):
         msgs.clear()
         #msgs.add_ai_message("Comment puis-je vous aider?")
 
 
     # Display suggested questions in a 2x2 table
-    col1, col2 = st.columns(2)
-    for i, question in enumerate(suggested_questions, start=1):
-        # if not st.session_state.get(f"suggested_question_{i}_hidden", False):
-        col = col1 if i % 2 != 0 else col2
-        col.button(question, on_click=suggestion_clicked, args=[question])
+    with st.container():
+        st.subheader("Amorces de conversation", divider="rainbow")
+        col1, col2 = st.columns(2)
+        for i, question in enumerate(suggested_questions, start=1):
+            # if not st.session_state.get(f"suggested_question_{i}_hidden", False):
+            col = col1 if i % 2 != 0 else col2
+            col.button(question, on_click=suggestion_clicked, args=[question])
 
 
     # Chat interface
@@ -381,7 +399,7 @@ def main():
         st.chat_message(avatars[msg.type]).write(msg.content)
         if (msg.type == "ai") and (i > 0):
             streamlit_feedback(feedback_type = "thumbs",
-                               optional_text_label="Cette réponse vous convient-elle?",
+                               optional_text_label="Cette réponse te convient?",
                                key=f"feedback_{i}",
                                on_submit=lambda x: _submit_feedback(x, emoji="👍"))
 
@@ -393,9 +411,12 @@ def main():
         handle_assistant_response(user_query)
 
     #Handle user queries
-    if user_query := st.chat_input(placeholder="Ask me anything!"):
+    if user_query := st.chat_input(placeholder="Pose-moi toutes tes questions!"):
         handle_assistant_response(user_query)
 
 
 if __name__ == "__main__":
+    if not check_password():
+        # Do not continue if check_password is not True.
+        st.stop()
     main()
