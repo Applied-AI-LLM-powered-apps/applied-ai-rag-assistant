@@ -4,13 +4,13 @@ import os
 
 from typing import Optional
 
+from langchain_aws.chat_models import ChatBedrock
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langchain_openai.embeddings import OpenAIEmbeddings, AzureOpenAIEmbeddings
 from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 from langchain_aws.embeddings.bedrock import BedrockEmbeddings
-from langchain_aws import ChatBedrock
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.core.llms import LLM
 
@@ -39,6 +39,7 @@ bedrock_region_name = config["BEDROCK"]["AWS_REGION_NAME"]
 bedrock_endpoint_url = config["BEDROCK"]["BEDROCK_ENDPOINT_URL"]
 
 # instantiating the Bedrock client, and passing in the CLI profile
+# TODO should be done lazyly only for bedrock
 bedrock = boto3.client('bedrock-runtime', bedrock_region_name,
                        endpoint_url=bedrock_endpoint_url)
 
