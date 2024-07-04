@@ -36,12 +36,6 @@ log_dir = "logs"
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
-# handler = logging.FileHandler(os.path.join(log_dir, 'feedback.log'))
-# handler.setLevel(logging.INFO)
-
-# formatter = logging.Formatter('%(asctime)s - %(message)s')
-# handler.setFormatter(formatter)
-
 logger.handlers.clear()
 handler = logging.FileHandler(os.path.join(log_dir, 'feedback.log'))
 handler.setLevel(logging.INFO)
@@ -56,7 +50,7 @@ upload_directory = config['FILE_MANAGEMENT']['UPLOAD_DIRECTORY']
 top_k = int(config['LANGCHAIN']['SEARCH_TOP_K'])
 search_type = config['LANGCHAIN']['SEARCH_TYPE']
 
-#sessionid = "abc123"
+
 # Generate session ID
 def get_session_id():
     if "session_id" not in st.session_state:
@@ -183,18 +177,6 @@ def configure_retriever():
                                       search_kwargs={"k": top_k})
 
     return retriever
-
-# def _submit_feedback(user_response, user_query, ai_response):
-#             if user_response['score'] == '👍':
-#                 feedback_score = '+1'
-#             else:
-#                 feedback_score = '-1'
-#             logger.info(f"User Query: {user_query}, AI Response: {ai_response}, Feedback_Score: {feedback_score}, Feedback_text: {user_response['text']}")
-#             return user_response
-
-# def _submit_feedback(user_response):
-#     feedback_score = '+1' if user_response['score'] == '👍' else '-1'
-#     return feedback_score, user_response['text']
 
 
 st.set_page_config(page_title="Chat with Documents", page_icon="🦜")
