@@ -1,13 +1,10 @@
 import os
 from typing import Sequence, Optional
 
-import chromadb
 from langchain_core.documents import Document
-# from langchain_core.language_models import LLM
 from llama_index.core import Settings, VectorStoreIndex, load_index_from_storage, StorageContext, \
     Document as LIDocument, get_response_synthesizer, DocumentSummaryIndex
 from llama_index.core.agent import FunctionCallingAgentWorker, AgentRunner
-from llama_index.core.agent.function_calling.base import FunctionCallingAgent
 from llama_index.core.base.base_query_engine import BaseQueryEngine
 from llama_index.core.indices.base import BaseIndex
 from llama_index.core.llms import LLM

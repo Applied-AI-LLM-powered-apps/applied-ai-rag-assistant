@@ -27,6 +27,7 @@ config = load_config()
 
 # "local:BAAI/bge-small-en-v1.5"
 
+
 # https://python.langchain.com/docs/use_cases/question_answering/
 # https://python.langchain.com/docs/modules/chains/document/stuff
 # https://python.langchain.com/docs/modules/chains/document/map_reduce
