@@ -99,7 +99,7 @@ resource "aws_ecs_task_definition" "ai_assistant_task_definition" {
     },
     {
       sourceVolume  = "configuration-secret"
-      containerPath = "/app/.streamlit/secrets.toml"
+      containerPath = "/app/.streamlit"
       readOnly      = false
     }]
     memoryReservation = 1024
