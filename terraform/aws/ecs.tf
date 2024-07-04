@@ -100,7 +100,7 @@ resource "aws_ecs_task_definition" "ai_assistant_task_definition" {
     {
       sourceVolume  = "configuration-secret"
       containerPath = "/app/.streamlit/secrets.toml"
-      readOnly      = true
+      readOnly      = false
     }]
     memoryReservation = 1024
     portMappings = [{
