@@ -78,3 +78,9 @@ variable "opensearch_dashboard_password" {
   description = "Password for Opensearch Dahsboard user"
   type        = string
 }
+
+variable "opensearch_allowed_users_and_policy_arn" {
+  description = "List of allowed users and roles"
+  type        = list(string)
+}
+

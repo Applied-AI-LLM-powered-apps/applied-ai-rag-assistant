@@ -72,6 +72,14 @@ resource "aws_ecs_task_definition" "ai_assistant_task_definition" {
       transit_encryption = "ENABLED"
     }
   }
+  volume {
+    name = "configuration-secret"
+    efs_volume_configuration {
+      file_system_id     = aws_efs_file_system.ai_assistant_efs_file_system.id
+      root_directory     = "/"
+      transit_encryption = "ENABLED"
+    }
+  }
   execution_role_arn = aws_iam_role.ai_assistant_ecs_execution_role.arn
   task_role_arn      = aws_iam_role.ai_assistant_ecs_execution_role.arn
 
@@ -88,6 +96,11 @@ resource "aws_ecs_task_definition" "ai_assistant_task_definition" {
       sourceVolume  = "efs-volume"
       containerPath = "/app/data/chroma"
       readOnly      = false
+    },
+    {
+      sourceVolume  = "configuration-secret"
+      containerPath = "/app/.streamlit/secrets.toml"
+      readOnly      = true
     }]
     memoryReservation = 1024
     portMappings = [{

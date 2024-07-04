@@ -4,7 +4,7 @@ data "aws_iam_policy_document" "opensearch_domain_policy" {
 
     principals {
       type        = "AWS"
-      identifiers = ["*"]
+      identifiers = var.opensearch_allowed_users_and_policy_arn #list of arn
     }
 
     actions   = ["es:*"]
@@ -13,7 +13,7 @@ data "aws_iam_policy_document" "opensearch_domain_policy" {
   statement {
     principals {
       type        = "AWS"
-      identifiers = ["*"]
+      identifiers = var.opensearch_allowed_users_and_policy_arn #list of arn
     }
 
     actions   = ["es:*"]
