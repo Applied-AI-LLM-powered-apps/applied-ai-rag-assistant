@@ -57,7 +57,6 @@ llama-index-llms-anthropic = ">=0.1.11"
 llama-index-embeddings-mistralai = ">=0.1.4"
 llama-index-embeddings-langchain = ">=0.1.2"
 llama-index-embeddings-bedrock = ">=0.1.5"
-protobuf = "=3.20.3"
 
 # pysqlite3-binary = "^0.5.2.post3"
 langchain_mistralai = ">=0.1.0"
