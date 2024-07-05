@@ -296,7 +296,6 @@ def handle_assistant_response(user_query):
         )
 
         ai_response = response["answer"]
-        #print(ai_response)
         e.empty()
         with e.container():
             st.markdown(ai_response)
@@ -449,4 +448,7 @@ def main():
     
 
 if __name__ == "__main__":
+    if not check_password():
+        # Do not continue if check_password is not True.
+        st.stop()
     main()
