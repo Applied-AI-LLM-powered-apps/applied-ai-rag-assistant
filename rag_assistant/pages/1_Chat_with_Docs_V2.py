@@ -66,35 +66,9 @@ upload_directory = config['FILE_MANAGEMENT']['UPLOAD_DIRECTORY']
 top_k = int(config['LANGCHAIN']['SEARCH_TOP_K'])
 search_type = config['LANGCHAIN']['SEARCH_TYPE']
 
-#sessionid = "abc123"
-# Generate session ID
-def get_session_id():
-    if "session_id" not in st.session_state:
-        sesssion_id = "Nouvelle conversation 1"
-        st.session_state.session_id = sesssion_id
-    return st.session_state.session_id
 
-# Retrieve chat history for a given session
-def get_chat_history(session_id):
-    if "chat_histories" not in st.session_state:
-        st.session_state.chat_histories = {}
-    if session_id not in st.session_state.chat_histories:
-        st.session_state.chat_histories[session_id] = StreamlitChatMessageHistory(key=f"chat_history_{session_id}")
-    return st.session_state.chat_histories[session_id]
 
-#Generer les titres en utilisant le LLM
-def generate_session_title(query):
-    prompt = f"Créez une phrase concise de 3 à 5 mots comme en-tête de la requête suivante, en respectant strictement la limite de 3 à 5 mots Pas besoin de reformuler la requete en disant 'Voici une phrase comncise de 3 mots comme en-tete pour votre requete:' avant de l'afficher , affiche juste les 3 ou 5 mots: {query}"
-    llm = load_model()
-    response = llm.invoke(prompt)
-
-    # Se rassurer que la reponse est une chaine de caractere 
-    if isinstance(response, str):
-        return response.strip()
-    elif hasattr(response, 'content'):  
-        return response.content.strip()
-    else:
-        raise ValueError("Unexpected response type from LLM")
+sessionid = "abc123"
 
 class StreamHandler(BaseCallbackHandler):
     def __init__(self, container: st.delta_generator.DeltaGenerator, ctx, initial_text: str = ""):
@@ -260,9 +234,7 @@ llm = load_model(streaming=True)
 
 # llm.bind_tools(lc_tools)
 
-session_id = get_session_id()
-msgs = get_chat_history(session_id)
-
+msgs = get_session_history(sessionid)
 memory = ConversationBufferMemory(memory_key="chat_history", chat_memory=msgs, return_messages=True)
 
 ### Contextualize question ###
@@ -322,7 +294,7 @@ rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chai
 
 memory_rag_chain = RunnableWithMessageHistory(
     rag_chain,
-    get_chat_history,
+    get_session_history,
     input_messages_key="input",
     history_messages_key="chat_history",
     output_messages_key="answer",
@@ -361,7 +333,7 @@ def question_answerer(question: str) -> str:
     e = st.empty()
     stream_handler = StreamHandler(e, ctx)
     return memory_rag_chain.invoke(input={"input": question, "topics": topics}, config={
-        "configurable": {"session_id": session_id},
+        "configurable": {"session_id": sessionid},
         "callbacks": [
             retrieval_handler,
             stream_handler
@@ -415,36 +387,18 @@ if 'conversation_starters' not in st.session_state:
 
 @traceable(run_type="chain", project_name="RAG Assistant", tags=["LangChain", "RAG", "Chat_with_Docs"])
 def handle_assistant_response(user_query):
-    session_id = get_session_id()
-    msgs = get_chat_history(session_id)
-    
     st.chat_message("user").write(user_query)
     with ((st.chat_message("assistant"))):
-        # Retrieving the streamlit context to bind it to call back
-        # in order to write in another threadcontext
-        ctx = get_script_run_ctx()
-        retrieval_handler = PrintRetrievalHandler(st.container(), ctx)
-        # RETRIEVE THE CONTAINER TO CLEAR IT LATER to not show question twice
-        e = st.empty()
-        stream_handler = StreamHandler(e, ctx)
-        
-        # NEW API OF LANGCHAIN
-        # PROMPT NEED TO BE CHANGED
-        response = conversational_rag_chain.invoke(
+        if 'retrievals' in st.session_state:
+            del st.session_state['retrievals']
+        response = main_chain.invoke(
             input={"input": user_query, "topics": topics},
-            config={
-                "configurable": {"session_id": session_id},
-                "callbacks": [
-                    retrieval_handler,
-                    stream_handler
-                ]
-            },
+            config={"configurable": {"session_id": sessionid}}
         )
-
-
-        ai_response = response["output"]
+        ai_response = response["output"]  # "answer"
         # emptying container to remove initial question that is render by llm
-        e.empty()
+        # e.empty()
+        e = st.empty()
         with e.container():
             st.markdown(ai_response)
             # context = response["context"]
@@ -478,115 +432,48 @@ def display_context_in_pdf_viewer(context):
                        pages_to_render=pages)
 
 
-# def suggestion_clicked(question):
-#     st.session_state.user_suggested_question = question
-
 def suggestion_clicked(question):
-    session_id = get_session_id()
-    if session_id not in st.session_state.chat_titles or st.session_state.chat_titles[session_id] == session_id:
-        title = generate_session_title(question)
-        st.session_state.chat_titles[session_id] = title
     st.session_state.user_suggested_question = question
 
 
 def main():
-    st.title("Dialogue avec les connaissances")
-    st.sidebar.title("Sessions de conversation")
+    st.title("Dialogue avec les Connaissances")
+
+    msgs = get_session_history(sessionid)
 
     suggested_questions = st.session_state['conversation_starters']
 
-    if "session_id" not in st.session_state:
-        session_id = get_session_id()
-    else:
-        session_id = st.session_state.session_id
+    if len(msgs.messages) == 0 or st.sidebar.button("Effacer la conversation"):
+        msgs.clear()
 
-    if "chat_histories" not in st.session_state:
-        st.session_state.chat_histories = {}
+    # Display suggested questions in a 2x2 table
+    with st.container():
+        st.subheader("Amorces de conversation", divider="rainbow")
+        col1, col2 = st.columns(2)
+        for i, question in enumerate(suggested_questions, start=1):
+            # if not st.session_state.get(f"suggested_question_{i}_hidden", False):
+            col = col1 if i % 2 != 0 else col2
+            col.button(question, on_click=suggestion_clicked, args=[question])
 
-    if "chat_titles" not in st.session_state:
-        st.session_state.chat_titles = {}
+    # Chat interface
+    avatars = {"human": "user", "ai": "assistant"}
+    msgs = get_session_history(sessionid)
+    for i, msg in enumerate(msgs.messages):
+        st.chat_message(avatars[msg.type]).write(msg.content)
+        if (msg.type == "ai") and (i > 0):
+            streamlit_feedback(feedback_type="thumbs",
+                               optional_text_label="Cette réponse te convient?",
+                               key=f"feedback_{i}",
+                               on_submit=lambda x: _submit_feedback(x, emoji="👍"))
 
-    if "new_chat_counter" not in st.session_state:
-        st.session_state.new_chat_counter = 1
-
-    chat_sessions = list(st.session_state.chat_histories.keys())
-
-    if st.sidebar.button("Nouvelle Conversation"):
-        st.session_state.new_chat_counter += 1
-        session_id = f"Nouvelle Conversation {st.session_state.new_chat_counter}"
-        st.session_state.session_id = session_id
-        st.session_state.chat_histories[session_id] = StreamlitChatMessageHistory(key=f"chat_history_{session_id}")
-        st.session_state.chat_titles[session_id] = session_id  # Use session ID as a temporary title
-        st.rerun()
-
-    selected_session = session_id
-    session_deleted = False
-
-    # Reverse the chat sessions to display the newest first
-    for chat_session in reversed(chat_sessions):
-        title = st.session_state.chat_titles.get(chat_session, chat_session)
-        with st.sidebar:
-            with st.expander(title):
-                if st.button(f"🚮 Supprimer", key=f"delete_{chat_session}"):
-                    if chat_session in st.session_state.chat_histories:
-                        del st.session_state.chat_histories[chat_session]
-                    if chat_session in st.session_state.chat_titles:
-                        del st.session_state.chat_titles[chat_session]
-                    session_deleted = True
-                    if selected_session == chat_session:
-                        selected_session = None
-                    break
-                else:
-                    if st.button(f"{title}", key=f"select_{chat_session}"):
-                        selected_session = chat_session
-                        st.session_state.session_id = selected_session
-                        st.rerun()
-
-    if session_deleted:
-        chat_sessions = list(st.session_state.chat_histories.keys())
-        if chat_sessions:
-            selected_session = chat_sessions[0]
-        else:
-            selected_session = None
-            st.session_state.new_chat_counter = 1
-            session_id = f"Nouvelle Conversation {st.session_state.new_chat_counter}"
-            st.session_state.chat_histories[session_id] = StreamlitChatMessageHistory(key=f"chat_history_{session_id}")
-            st.session_state.chat_titles[session_id] = session_id
-            selected_session = session_id
-        st.session_state.session_id = selected_session
-        st.rerun()
-
-    if selected_session != session_id:
-        session_id = selected_session
-        st.session_state.session_id = session_id
-
-    msgs = get_chat_history(session_id) if session_id else None
-
-    st.subheader("Amorces de conversation", divider="rainbow")
-    col1, col2 = st.columns(2)
-    for i, question in enumerate(suggested_questions, start=1):
-        col = col1 if i % 2 != 0 else col2
-        col.button(question, on_click=suggestion_clicked, args=[question])
-
-    if msgs and len(msgs.messages) > 0:
-        avatars = {"human": "user", "ai": "assistant"}
-        for i, msg in enumerate(msgs.messages):
-            st.chat_message(avatars[msg.type]).write(msg.content)
-            if msg.type == "ai" and i > 0:
-                streamlit_feedback(feedback_type="thumbs",
-                                   optional_text_label="Cette réponse vous convient-elle?",
-                                   key=f"feedback_{i}",
-                                   on_submit=lambda x: _submit_feedback(x, emoji="👍"))
-
+    # Handle suggested questions
     if "user_suggested_question" in st.session_state:
         user_query = st.session_state.user_suggested_question
-        st.session_state.pop("user_suggested_question")
+        st.session_state.pop("user_suggested_question")  # Clear the session state
         handle_assistant_response(user_query)
 
-    if user_query := st.chat_input(placeholder="Pose moi tes questions!"):
-        if session_id not in st.session_state.chat_titles or st.session_state.chat_titles[session_id] == session_id:
-            title = generate_session_title(user_query)
-            st.session_state.chat_titles[session_id] = title
+    # Handle user queries
+    if user_query := st.chat_input(placeholder="Pose-moi toutes tes questions!"):
         handle_assistant_response(user_query)
 
 
