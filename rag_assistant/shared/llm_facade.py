@@ -90,7 +90,7 @@ def get_conversation_starters(topics: list[str], count:int = 4):
 
 suggested_questions_examples = [
     "Comment sécuriser les données sensibles ?",
-    "Comment assurez l'efficacité des performances ?",
+    "Comment assurer l'efficacité des performances ?",
     "En quoi consiste l'Analyse de risque MESARI ?",
     "A quoi sert le Cross Origin Resource Sharing ?",
     "Quels sont les principes de la Content Security Policy ?",
